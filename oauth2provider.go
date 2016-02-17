@@ -10,66 +10,64 @@ import (
 	"github.com/credli/osin"
 	"github.com/gorilla/mux"
 
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/net/context"
 	"google.golang.org/appengine"
 	"google.golang.org/appengine/log"
 	"google.golang.org/appengine/urlfetch"
 )
 
-var (
+type AEServer struct {
+	sconfig *osin.ServerConfig
 	server  *osin.Server
-	storage *AEStorage
-)
+	storage osin.Storage
+}
 
-func init() {
-	sconfig := osin.NewServerConfig()
-	sconfig.AllowedAuthorizeTypes = osin.AllowedAuthorizeType{osin.CODE, osin.TOKEN}
-	sconfig.AllowedAccessTypes = osin.AllowedAccessType{
+func NewServer() *AEServer {
+	s := &AEServer{sconfig: osin.NewServerConfig()}
+
+	s.sconfig.AllowedAuthorizeTypes = osin.AllowedAuthorizeType{osin.CODE, osin.TOKEN}
+	s.sconfig.AllowedAccessTypes = osin.AllowedAccessType{
 		osin.AUTHORIZATION_CODE,
 		osin.REFRESH_TOKEN,
 		osin.PASSWORD,
 		osin.CLIENT_CREDENTIALS}
-	sconfig.AllowGetAccessRequest = true
-	sconfig.AllowClientSecretInParams = true
+	s.sconfig.AllowGetAccessRequest = true
+	s.sconfig.AllowClientSecretInParams = true
+	s.storage = NewAEStorage()
+	s.server = osin.NewServer(s.sconfig, s.storage)
+	s.server.AccessTokenGen = &AccessTokenGenJWT{privatekey, publickey}
+	return s
+}
 
-	storage = NewAEStorage()
-	server = osin.NewServer(sconfig, storage)
-
+func init() {
+	server := NewServer()
 	r := mux.NewRouter()
-	r.HandleFunc("/init", HandleInitClient)
-	r.HandleFunc("/authorize", HandleAuthorize)
-	r.HandleFunc("/token", HandleToken)
-	r.HandleFunc("/info", HandleInfo)
-	r.HandleFunc("/app", HandleApp)
-	r.HandleFunc("/appauth/code", HandleAppAuthCode)
-	r.HandleFunc("/appauth/token", HandleAppAuthToken)
-	r.HandleFunc("/appauth/password", HandleAppAuthPassword)
-	r.HandleFunc("/appauth/client_credentials", HandleAppAuthClientCredentials)
-	r.HandleFunc("/appauth/refresh", HandleAppAuthRefresh)
-	r.HandleFunc("/appauth/info", HandleAppAuthInfo)
+	r.HandleFunc("/init", server.HandleInitClient)
+	r.HandleFunc("/authorize", server.HandleAuthorize)
+	r.HandleFunc("/token", server.HandleToken)
+
+	// r.HandleFunc("/app", HandleApp)
+	// r.HandleFunc("/appauth/code", HandleAppAuthCode)
+	// r.HandleFunc("/appauth/client_credentials", HandleAppAuthClientCredentials)
+	r.HandleFunc("/appauth/password", server.HandleAppAuthPassword)
+	r.HandleFunc("/appauth/info", server.HandleInfo)
+	r.HandleFunc("/appauth/refresh", server.HandleAppAuthRefresh)
+	// r.HandleFunc("/appauth/info", server.HandleAppAuthInfo)
 
 	http.Handle("/", r)
 }
 
-func HandleInitClient(w http.ResponseWriter, r *http.Request) {
+//HandleAuthorize handles implicit authorization
+//USAGE:http://localhost:8080/authorize?response_type=token&client_id=47bef51d-1b4a-4028-b4a1-07dfe3116a9b&state=xyz&scope=everything
+func (s *AEServer) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	client := &osin.DefaultClient{
-		Id:          "1234",
-		Secret:      "aabbccdd",
-		RedirectUri: "/appauth",
-	}
-	storage.SetClient(c, "1234", client)
-	w.Write([]byte(`<h1>Client set ok</h1>`))
-}
-
-func HandleAuthorize(w http.ResponseWriter, r *http.Request) {
-	c := appengine.NewContext(r)
-	resp := server.NewResponse()
+	resp := s.server.NewResponse()
 	defer resp.Close()
 
-	if ar := server.HandleAuthorizeRequest(c, resp, r); ar != nil {
+	if ar := s.server.HandleAuthorizeRequest(c, resp, r); ar != nil {
 		ar.Authorized = true
-		server.FinishAuthorizeRequest(c, resp, r, ar)
+		s.server.FinishAuthorizeRequest(c, resp, r, ar)
 	}
 	if resp.IsError && resp.InternalError != nil {
 		log.Errorf(c, "%v", resp.InternalError)
@@ -77,29 +75,39 @@ func HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !resp.IsError {
 		resp.Output["custom_parameter"] = 4567890567
 	}
+	log.Infof(c, "AUTHORIZED")
 	osin.OutputJSON(resp, w, r)
 }
 
-func HandleToken(w http.ResponseWriter, r *http.Request) {
+func (s *AEServer) HandleInitClient(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	resp := server.NewResponse()
-	defer resp.Close()
+	s.insertClient(c, "47bef51d-1b4a-4028-b4a1-07dfe3116a9b", "aabbccdd", "http://localhost:14000/appauth")
+}
 
-	if ar := server.HandleAccessRequest(c, resp, r); ar != nil {
+func (s *AEServer) HandleToken(w http.ResponseWriter, r *http.Request) {
+	c := appengine.NewContext(r)
+	log.Infof(c, "HANDLE TOKEN")
+	resp := s.server.NewResponse()
+	defer resp.Close()
+	if ar := s.server.HandleAccessRequest(c, resp, r); ar != nil {
 		switch ar.Type {
+		case osin.IMPLICIT:
+			log.Infof(c, "Passing through IMPLICIT %v", ar)
+			ar.Authorized = true
 		case osin.AUTHORIZATION_CODE:
+			log.Infof(c, "Passing through CODE %v", ar)
 			ar.Authorized = true
 		case osin.REFRESH_TOKEN:
 			ar.Authorized = true
 		case osin.PASSWORD:
-			// do password
-			if ar.Username == "test" && ar.Password == "test" {
+			log.Infof(c, "VERIFYING PASSWORD")
+			if s.verifyPassword(c, ar.Username, ar.Password) {
 				ar.Authorized = true
 			}
 		case osin.CLIENT_CREDENTIALS:
 			ar.Authorized = true
 		}
-		server.FinishAccessRequest(c, resp, r, ar)
+		s.server.FinishAccessRequest(c, resp, r, ar)
 	}
 	if resp.IsError && resp.InternalError != nil {
 		log.Errorf(c, "%v", resp.InternalError)
@@ -110,94 +118,30 @@ func HandleToken(w http.ResponseWriter, r *http.Request) {
 	osin.OutputJSON(resp, w, r)
 }
 
-func HandleInfo(w http.ResponseWriter, r *http.Request) {
+func (s *AEServer) verifyPassword(c context.Context, username, password string) bool {
+	user, err := s.GetUser(c, username)
+	if err != nil {
+		log.Infof(c, "USER NOT FOUND")
+		return false
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+//HandleInfo handles password authentication
+//USAGE: http://localhost:8080/appauth/info?grant_type=password&scope=everything&username=test&password=test
+func (s *AEServer) HandleInfo(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	resp := server.NewResponse()
+	resp := s.server.NewResponse()
 	defer resp.Close()
 
-	if ir := server.HandleInfoRequest(c, resp, r); ir != nil {
-		server.FinishInfoRequest(c, resp, r, ir)
-	}
-	if resp.IsError && resp.InternalError != nil {
-		log.Errorf(c, "Stops here... %v", resp.InternalError)
-		//log.Errorf(c, "%v", resp.InternalError)
-	}
-	if !resp.IsError {
-		resp.Output["custom_parameter"] = 233333
+	if ir := s.server.HandleInfoRequest(c, resp, r); ir != nil {
+		s.server.FinishInfoRequest(c, resp, r, ir)
 	}
 	osin.OutputJSON(resp, w, r)
-}
-
-func HandleApp(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("<html><body>"))
-	w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Init a default client with id 1234 (do this first!)</a><br/>", "/init")))
-	w.Write([]byte(fmt.Sprintf("<a href=\"/authorize?response_type=code&client_id=1234&state=xyz&scope=everything&redirect_uri=%s\">Code</a><br/>", url.QueryEscape("/appauth/code"))))
-	w.Write([]byte(fmt.Sprintf("<a href=\"/authorize?response_type=token&client_id=1234&state=xyz&scope=everything&redirect_uri=%s\">Implict</a><br/>", url.QueryEscape("/appauth/token"))))
-	w.Write([]byte(fmt.Sprintf("<a href=\"/appauth/password\">Password</a><br/>")))
-	w.Write([]byte(fmt.Sprintf("<a href=\"/appauth/client_credentials\">Client Credentials</a><br/>")))
-	w.Write([]byte("</body></html>"))
-}
-
-func HandleAppAuthCode(w http.ResponseWriter, r *http.Request) {
-	r.ParseForm()
-
-	code := r.Form.Get("code")
-
-	w.Write([]byte("<html><body>"))
-	w.Write([]byte("APP AUTH - CODE<br/>"))
-	defer w.Write([]byte("</body></html>"))
-
-	if code == "" {
-		w.Write([]byte("Nothing to do"))
-		return
-	}
-
-	jr := make(map[string]interface{})
-
-	// build access code url
-	aurl := fmt.Sprintf("http://%s/token?grant_type=authorization_code&client_id=1234&client_secret=aabbccdd&state=xyz&redirect_uri=%s&code=%s",
-		r.Host, url.QueryEscape("/appauth/code"), url.QueryEscape(code))
-
-	// if parse, download and parse json
-	if r.Form.Get("doparse") == "1" {
-		c := appengine.NewContext(r)
-		err := downloadAccessToken(c, aurl, &osin.BasicAuth{"1234", "aabbccdd"}, jr)
-		if err != nil {
-			w.Write([]byte(err.Error()))
-			w.Write([]byte("<br/>"))
-		}
-	}
-
-	// show json error
-	if erd, ok := jr["error"]; ok {
-		w.Write([]byte(fmt.Sprintf("ERROR: %s<br/>\n", erd)))
-	}
-
-	// show json access token
-	if at, ok := jr["access_token"]; ok {
-		w.Write([]byte(fmt.Sprintf("ACCESS TOKEN: %s<br/>\n", at)))
-	}
-
-	w.Write([]byte(fmt.Sprintf("FULL RESULT: %+v<br/>\n", jr)))
-
-	// output links
-	w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Goto Token URL</a><br/>", aurl)))
-
-	cururl := *r.URL
-	curq := cururl.Query()
-	curq.Add("doparse", "1")
-	cururl.RawQuery = curq.Encode()
-	w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Download Token</a><br/>", cururl.String())))
-
-	if rt, ok := jr["refresh_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/refresh?code=%s", rt)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Refresh Token</a><br/>", rurl)))
-	}
-
-	if at, ok := jr["access_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/info?code=%s", at)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Info</a><br/>", rurl)))
-	}
 }
 
 func HandleAppAuthToken(w http.ResponseWriter, r *http.Request) {
@@ -211,49 +155,55 @@ func HandleAppAuthToken(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("</body></html>"))
 }
 
-func HandleAppAuthPassword(w http.ResponseWriter, r *http.Request) {
+//HandleAppAuthPassword handles password authentication
+//USAGE: http://localhost:8080/appauth?grant_type=password&scope=everything&username=test&password=test
+func (s *AEServer) HandleAppAuthPassword(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
-
-	w.Write([]byte("<html><body>"))
-	w.Write([]byte("APP AUTH - PASSWORD<br/>"))
-
-	jr := make(map[string]interface{})
-
-	// build access code url
-	aurl := fmt.Sprintf("http://%s/token?grant_type=password&scope=everything&username=%s&password=%s",
-		r.Host, "test", "test")
-
-	// download token
 	c := appengine.NewContext(r)
-	err := downloadAccessToken(c, aurl, &osin.BasicAuth{Username: "1234", Password: "aabbccdd"}, jr)
-	if err != nil {
-		w.Write([]byte(err.Error()))
-		w.Write([]byte("<br/>"))
+	switch r.Method {
+
+	case "POST":
+
+		//provide tls encryption over connection
+		u := r.FormValue("username")
+		p := r.FormValue("password")
+		log.Infof(c, "HANDLE PASSWORD")
+		jr := make(map[string]interface{})
+
+		// build access code url
+		aurl := fmt.Sprintf("/token?grant_type=password&scope=everything&username=%s&password=%s", u, p)
+
+		err := downloadAccessToken(c, fmt.Sprintf("http://localhost:8081%s", aurl), &osin.BasicAuth{
+			Username: "47bef51d-1b4a-4028-b4a1-07dfe3116a9b", Password: "aabbccdd"}, jr) //Password must be encrypted and stored in GCS
+
+		if err != nil {
+			b, err := json.Marshal(jr)
+			if err == nil {
+
+				fmt.Fprintf(w, "%s", b)
+			}
+		}
+
+		// show json error
+		if _, ok := jr["error"]; ok {
+			b, err := json.Marshal(jr)
+			if err == nil {
+				fmt.Fprintf(w, "%s", b)
+			}
+		}
+
+		// show json access token
+		if _, ok := jr["access_token"]; ok {
+			b, err := json.Marshal(jr)
+			if err == nil {
+				fmt.Fprintf(w, "%s", b)
+			}
+		}
+
+	default:
+		fmt.Fprintf(w, "{%q:%q}", "error", "Bad Request")
 	}
 
-	// show json error
-	if erd, ok := jr["error"]; ok {
-		w.Write([]byte(fmt.Sprintf("ERROR: %s<br/>\n", erd)))
-	}
-
-	// show json access token
-	if at, ok := jr["access_token"]; ok {
-		w.Write([]byte(fmt.Sprintf("ACCESS TOKEN: %s<br/>\n", at)))
-	}
-
-	w.Write([]byte(fmt.Sprintf("FULL RESULT: %+v<br/>\n", jr)))
-
-	if rt, ok := jr["refresh_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/refresh?code=%s", rt)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Refresh Token</a><br/>", rurl)))
-	}
-
-	if at, ok := jr["access_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/info?code=%s", at)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Info</a><br/>", rurl)))
-	}
-
-	w.Write([]byte("</body></html>"))
 }
 
 func HandleAppAuthClientCredentials(w http.ResponseWriter, r *http.Request) {
@@ -300,57 +250,47 @@ func HandleAppAuthClientCredentials(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("</body></html>"))
 }
 
-func HandleAppAuthRefresh(w http.ResponseWriter, r *http.Request) {
+//HandleAppAuthRefresh handles refresh
+//USAGE: http://localhost:8080/appauth/refresh?grant_type=refresh_token&code=EdO7wVOtQCWIe117DiIPgg
+func (s *AEServer) HandleAppAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
-
-	w.Write([]byte("<html><body>"))
-	w.Write([]byte("APP AUTH - REFRESH<br/>"))
-	defer w.Write([]byte("</body></html>"))
-
 	code := r.Form.Get("code")
 
-	if code == "" {
-		w.Write([]byte("Nothing to do"))
-		return
-	}
+	if code != "" {
+		jr := make(map[string]interface{})
 
-	jr := make(map[string]interface{})
+		// build access code url
+		aurl := fmt.Sprintf("/token?grant_type=refresh_token&refresh_token=%s", url.QueryEscape(code))
 
-	// build access code url
-	aurl := fmt.Sprintf("http://%s/token?grant_type=refresh_token&refresh_token=%s", r.Host, url.QueryEscape(code))
+		c := appengine.NewContext(r)
+		log.Infof(c, "Getting Refresh")
+		err := downloadAccessToken(c, fmt.Sprintf("http://localhost:8081%s", aurl),
+			&osin.BasicAuth{Username: "47bef51d-1b4a-4028-b4a1-07dfe3116a9b", Password: "aabbccdd"}, jr)
+		if err != nil {
+			fmt.Fprintf(w, "{%q:%q}", "error", "Bad Request")
+		}
+		// show json error
+		if _, ok := jr["error"]; ok {
+			b, err := json.Marshal(jr)
+			if err == nil {
+				fmt.Fprintf(w, "%s", b)
+			}
+		}
 
-	// download token
-	c := appengine.NewContext(r)
-	err := downloadAccessToken(c, aurl, &osin.BasicAuth{Username: "1234", Password: "aabbccdd"}, jr)
-	if err != nil {
-		w.Write([]byte(err.Error()))
-		w.Write([]byte("<br/>"))
-	}
+		// show json access token
+		if _, ok := jr["access_token"]; ok {
+			b, err := json.Marshal(jr)
+			if err == nil {
+				fmt.Fprintf(w, "%s", b)
+			}
+		}
 
-	// show json error
-	if erd, ok := jr["error"]; ok {
-		w.Write([]byte(fmt.Sprintf("ERROR: %s<br/>\n", erd)))
-	}
-
-	// show json access token
-	if at, ok := jr["access_token"]; ok {
-		w.Write([]byte(fmt.Sprintf("ACCESS TOKEN: %s<br/>\n", at)))
-	}
-
-	w.Write([]byte(fmt.Sprintf("FULL RESULT: %+v<br/>\n", jr)))
-
-	if rt, ok := jr["refresh_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/refresh?code=%s", rt)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Refresh Token</a><br/>", rurl)))
-	}
-
-	if at, ok := jr["access_token"]; ok {
-		rurl := fmt.Sprintf("/appauth/info?code=%s", at)
-		w.Write([]byte(fmt.Sprintf("<a href=\"%s\">Info</a><br/>", rurl)))
+	} else {
+		fmt.Fprintf(w, "{%q:%q}", "error", "Bad Request")
 	}
 }
 
-func HandleAppAuthInfo(w http.ResponseWriter, r *http.Request) {
+func (s *AEServer) HandleAppAuthInfo(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 
 	w.Write([]byte("<html><body>"))
@@ -397,6 +337,10 @@ func HandleAppAuthInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func downloadAccessToken(c context.Context, url string, auth *osin.BasicAuth, output map[string]interface{}) error {
+	if auth == nil || url == "" {
+		return errors.New(osin.E_INVALID_REQUEST)
+	}
+
 	// download access token
 	preq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -406,7 +350,8 @@ func downloadAccessToken(c context.Context, url string, auth *osin.BasicAuth, ou
 		preq.SetBasicAuth(auth.Username, auth.Password)
 	}
 
-	//pclient := &http.Client{} //Not supported in app engine
+	log.Infof(c, "HANDLE DOWNLOAD TOKEN")
+
 	pclient := urlfetch.Client(c)
 	presp, err := pclient.Do(preq)
 	if err != nil {
