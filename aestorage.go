@@ -13,6 +13,7 @@ import (
 
 var (
 	ClientKind     = "Client"
+	UserKind       = "User"
 	AccessDataKind = "AccessData"
 	AuthorizeKind  = "Authorize"
 )
@@ -31,24 +32,64 @@ func (s *AEStorage) Clone() osin.Storage {
 func (s *AEStorage) Close() {
 }
 
+func (s *AEServer) insertClient(c context.Context, clientId string, secret string, redirectURI string, name string) error {
+	//var data map[string]osin.Client
+	client := &ClientModel{
+		Id:          clientId,
+		Secret:      secret,
+		RedirectUri: redirectURI,
+		Name:        name,
+	}
+
+	if cl, err := s.storage.GetClient(c, client.GetId()); err != nil {
+		cm := FromClient(client)
+		key := datastore.NewKey(c, ClientKind, cm.GetId(), 0, nil)
+		_, err := datastore.Put(c, key, cm)
+		if err != nil {
+			log.Errorf(c, "Error: %v", err)
+			return err
+		}
+	} else {
+		return s.SetClient(c, cl)
+	}
+
+	return nil
+}
+
+func (s *AEServer) GetUser(c context.Context, username string) (*User, error) {
+	q := datastore.NewQuery(UserKind).Filter("username =", username)
+	var users []*User
+	_, err := q.GetAll(c, &users)
+	if err != nil {
+		return nil, err
+		//return nil, errors.New("User not found")
+	} else if len(users) > 0 {
+		return users[0], nil
+	}
+	return nil, errors.New("User Not Found")
+}
+
 func (s *AEStorage) GetClient(c context.Context, id string) (osin.Client, error) {
 	key := datastore.NewKey(c, ClientKind, id, 0, nil)
 	var client ClientModel
 	err := datastore.Get(c, key, &client)
 	if err != nil {
+
 		return nil, errors.New("Client not found")
 	}
 	return client.ToClient(), nil
 }
 
-func (s *AEStorage) SetClient(c context.Context, id string, client osin.Client) error {
+func (s *AEServer) SetClient(c context.Context, client osin.Client) error {
 	cm := FromClient(client)
-	key := datastore.NewKey(c, ClientKind, id, 0, nil)
-	_, err := datastore.Put(c, key, cm)
-	if err != nil {
-		log.Errorf(c, "Error: %v", err)
-		return err
-	}
+
+	cm.Id = client.GetId()
+	cm.Secret = client.GetSecret()
+	cm.RedirectUri = client.GetRedirectUri()
+
+	key := datastore.NewKey(c, ClientKind, cm.GetId(), 0, nil)
+	datastore.Put(c, key, cm)
+
 	return nil
 }
 
