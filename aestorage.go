@@ -32,25 +32,15 @@ func (s *AEStorage) Clone() osin.Storage {
 func (s *AEStorage) Close() {
 }
 
-func (s *AEServer) insertClient(c context.Context, clientId string, secret string, redirectURI string, name string) error {
-	//var data map[string]osin.Client
-	client := &ClientModel{
-		Id:          clientId,
-		Secret:      secret,
-		RedirectUri: redirectURI,
-		Name:        name,
-	}
-
-	if cl, err := s.storage.GetClient(c, client.GetId()); err != nil {
-		cm := FromClient(client)
-		key := datastore.NewKey(c, ClientKind, cm.GetId(), 0, nil)
-		_, err := datastore.Put(c, key, cm)
+func (s *AEServer) insertClient(c context.Context, client *ClientModel) error {
+	if _, err := s.storage.GetClient(c, client.GetId()); err != nil {
+		//cm := FromClient(client)
+		key := datastore.NewKey(c, ClientKind, client.GetId(), 0, nil)
+		_, err := datastore.Put(c, key, client)
 		if err != nil {
 			log.Errorf(c, "Error: %v", err)
 			return err
 		}
-	} else {
-		return s.SetClient(c, cl)
 	}
 
 	return nil

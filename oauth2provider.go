@@ -21,6 +21,7 @@ type AEServer struct {
 	sconfig *osin.ServerConfig
 	server  *osin.Server
 	storage osin.Storage
+	AACJWT  AccessTokenGenJWT
 }
 
 func NewServer() *AEServer {
@@ -36,7 +37,8 @@ func NewServer() *AEServer {
 	s.sconfig.AllowClientSecretInParams = true
 	s.storage = NewAEStorage()
 	s.server = osin.NewServer(s.sconfig, s.storage)
-	s.server.AccessTokenGen = &AccessTokenGenJWT{privatekey, publickey}
+	AACJWT := &AccessTokenGenJWT{privatekey, publickey}
+	s.server.AccessTokenGen = AACJWT
 	return s
 }
 
@@ -54,7 +56,6 @@ func init() {
 	r.HandleFunc("/appauth/info", server.HandleInfo)
 	r.HandleFunc("/appauth/refresh", server.HandleAppAuthRefresh)
 	// r.HandleFunc("/appauth/info", server.HandleAppAuthInfo)
-
 	http.Handle("/", r)
 }
 
@@ -81,7 +82,16 @@ func (s *AEServer) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 func (s *AEServer) HandleInitClient(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	s.insertClient(c, "47bef51d-1b4a-4028-b4a1-07dfe3116a9b", "aabbccdd", "http://localhost:14000/appauth")
+
+	client := &ClientModel{
+		"47bef51d-1b4a-4028-b4a1-07dfe3116a9b",
+		"Paperplane Auth",
+		"http://localhost:14000/appauth",
+		true,
+		"password",
+		"aabbccdd",
+	}
+	s.insertClient(c, client)
 }
 
 func (s *AEServer) HandleToken(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +111,9 @@ func (s *AEServer) HandleToken(w http.ResponseWriter, r *http.Request) {
 			ar.Authorized = true
 		case osin.PASSWORD:
 			log.Infof(c, "VERIFYING PASSWORD")
-			if s.verifyPassword(c, ar.Username, ar.Password) {
+			if err := s.verifyPassword(c, ar.Username, ar.Password); err == nil {
+				// var cl PPClient
+				// cl = ar.Client.(PPClient)
 				ar.Authorized = true
 			}
 		case osin.CLIENT_CREDENTIALS:
@@ -118,17 +130,17 @@ func (s *AEServer) HandleToken(w http.ResponseWriter, r *http.Request) {
 	osin.OutputJSON(resp, w, r)
 }
 
-func (s *AEServer) verifyPassword(c context.Context, username, password string) bool {
+func (s *AEServer) verifyPassword(c context.Context, username, password string) error {
 	user, err := s.GetUser(c, username)
 	if err != nil {
 		log.Infof(c, "USER NOT FOUND")
-		return false
+		return err
 	}
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
 	if err != nil {
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 //HandleInfo handles password authentication
@@ -140,6 +152,9 @@ func (s *AEServer) HandleInfo(w http.ResponseWriter, r *http.Request) {
 
 	if ir := s.server.HandleInfoRequest(c, resp, r); ir != nil {
 		s.server.FinishInfoRequest(c, resp, r, ir)
+		if err := s.AACJWT.VerToken(ir.AccessData.AccessToken); err != nil {
+			log.Infof(c, err.Error())
+		}
 	}
 	osin.OutputJSON(resp, w, r)
 }

@@ -79,12 +79,27 @@ func (cl *ClientModel) GetRedirectUri() string { return cl.RedirectUri }
 // Data to be passed to storage. Not used by the library.
 func (cl *ClientModel) GetUserData() interface{} { return cl.GetUserData() }
 
+func (cl *ClientModel) GetName() string {
+	return cl.Name
+}
+
+func (cl *ClientModel) GetGrant() string {
+	return cl.GrantType
+}
+
+func (cl *ClientModel) GetActive() bool {
+	return cl.Active
+}
+
 func (c *ClientModel) ToClient() osin.Client {
 	var client = &PPClient{
 		Id:          c.Id,
 		Secret:      c.Secret,
 		RedirectUri: c.RedirectUri,
 		UserData:    c,
+		Active:      c.GetActive(),
+		GrantType:   c.GetGrant(),
+		Name:        c.GetName(),
 	}
 	return client
 }
@@ -94,6 +109,9 @@ func FromClient(client osin.Client) *ClientModel {
 		Id:          client.GetId(),
 		Secret:      client.GetSecret(),
 		RedirectUri: client.GetRedirectUri(),
+		// Active:      true,
+		// GrantType:   "password",
+		// Name:        "api",
 	}
 }
 
